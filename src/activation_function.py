@@ -5,23 +5,48 @@ class ActivationFunctions:
     def linear(self, x):
         return x
 
+    def linear_derivative(self, x):
+        return np.ones_like(x)
+
     def relu(self, x):
         return np.maximum(0, x)
+
+    def relu_derivative(self, x):
+        return (x > 0).astype(float)
 
     def sigmoid(self, x):
         return 1 / (1 + np.exp(-x))
 
+    def sigmoid_derivative(self, x):
+        s = self.sigmoid(x)
+        return s * (1 - s)
+
     def tanh(self, x):
         return np.tanh(x)
+
+    def tanh_derivative(self, x):
+        t = self.tanh(x)
+        return 1 - t**2
 
     def softmax(self, x):
         exp_x = np.exp(x - np.max(x))
         return exp_x / exp_x.sum(axis=-1, keepdims=True)
 
+    def softmax_derivative(self, x):
+        s = self.softmax(x)
+        return s * (1 - s)
+
     # Bonus: fungsi aktivasi tambahan
     def elu(self, x, alpha=1.0):
         return np.where(x > 0, x, alpha*(np.exp(x) - 1))
 
+    def elu_derivative(self, x, alpha=1.0):
+        return np.where(x > 0, 1, alpha * np.exp(x))
+
     # Bonus: fungsi aktivasi tambahan
     def swish(self, x):
         return x*self.sigmoid(x)
+
+    def swish_derivative(self, x):
+        s = self.sigmoid(x)
+        return s + x * s * (1 - s)
