@@ -1,6 +1,5 @@
 import numpy as np
 
-# Kelas fungsi loss -- Mean Squared Error, Binary Cross-Entropy, Categorical Cross-Entropy
 class LossFunctions:
     def mean_squared_error(self, y_true, y_pred):
         return np.mean((y_true - y_pred)**2)

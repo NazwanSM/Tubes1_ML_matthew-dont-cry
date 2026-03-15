@@ -1,0 +1,258 @@
+import pickle
+import numpy as np
+import matplotlib.pyplot as plt
+
+from layer import DenseLayer
+from activation_function import ActivationFunctions
+from loss_function import LossFunctions
+from initialization import Initialization
+from rmsnorm import RMSNorm
+
+class FFNN:
+    def __init__(self, layer_sizes, activations, loss, init_method='he', init_params=None, normalization=None):
+        if len(activations) != len(layer_sizes) - 1:
+            raise ValueError(
+                f"Jumlah aktivasi ({len(activations)}) harus sama dengan "
+                f"jumlah layer transisi ({len(layer_sizes) - 1})"
+            )
+
+        self.layer_sizes = layer_sizes
+        self.activation_names = activations
+        self.loss_name = loss
+
+        # Inisialisasi 
+        self._act = ActivationFunctions()
+        self._loss_obj = LossFunctions()
+        self._init = Initialization()
+
+        self._act_fns = []
+        self._act_derivs = []
+        for name in activations:
+            self._act_fns.append(getattr(self._act, name))
+            self._act_derivs.append(getattr(self._act, f"{name}_derivative"))
+
+        self._loss_fn = getattr(self._loss_obj, loss)
+        self._loss_deriv = getattr(self._loss_obj, f"{loss}_derivative")
+
+        self._use_combined_softmax_cce = (
+            loss == 'categorical_cross_entropy' 
+            and len(activations) > 0 
+            and activations[-1] == 'softmax'
+        )
+        
+        self.layers = []
+        self.norms = []
+        if init_params is None:
+            init_params = {}
+
+        for i in range(len(layer_sizes) - 1):
+            method = init_method if isinstance(init_method, str) else init_method[i]
+            params = init_params if isinstance(init_params, dict) else init_params[i]
+
+            # Buat DenseLayer 
+            layer = DenseLayer(layer_sizes[i], layer_sizes[i + 1], init_method='zero')
+
+            weight_shape = (layer_sizes[i], layer_sizes[i + 1])
+            bias_shape = (1, layer_sizes[i + 1])
+
+            init_fn = getattr(self._init, method)
+            layer.weights = init_fn(weight_shape, **params)
+
+            self.layers.append(layer)
+
+            # RMSNorm per layer
+            if normalization is not None:
+                norm_flag = normalization if isinstance(normalization, bool) else (
+                    normalization[i] if i < len(normalization) else False
+                )
+                if norm_flag:
+                    self.norms.append(RMSNorm(layer_sizes[i + 1]))
+                else:
+                    self.norms.append(None)
+            else:
+                self.norms.append(None)
+
+        self._net_cache = []   
+        self._act_cache = []   
+        self._norm_cache = []
+
+        self.history = {
+            'train_loss': [],
+            'val_loss': []
+        }
+
+    def forward(self, x):
+        self._net_cache = []
+        self._act_cache = [x]
+        self._norm_cache = []
+
+        output = x
+        for i, layer in enumerate(self.layers):
+            net = layer.forward(output)
+
+            # RMSNorm (antara linear dan aktivasi)
+            if self.norms[i] is not None:
+                net = self.norms[i].forward(net)
+            self._norm_cache.append(net)
+
+            self._net_cache.append(net)
+            output = self._act_fns[i](net)
+            self._act_cache.append(output)
+
+        return output
+
+    def backward(self, y_true, y_pred):
+        n_layers = len(self.layers)
+
+        # gradien awal dari loss function
+        if self._use_combined_softmax_cce:
+            grad = (y_pred - y_true) / y_true.shape[0]
+            # Layer terakhir tanpa activation derivative 
+            if self.norms[-1] is not None:
+                grad = self.norms[-1].backward(grad)
+            grad = self.layers[-1].backward(grad)
+
+            for i in reversed(range(n_layers - 1)):
+                act_deriv = self._act_derivs[i](self._net_cache[i])
+                grad = grad * act_deriv
+                if self.norms[i] is not None:
+                    grad = self.norms[i].backward(grad)
+                grad = self.layers[i].backward(grad)
+        else:
+            grad = self._loss_deriv(y_true, y_pred)
+
+            for i in reversed(range(n_layers)):
+                act_deriv = self._act_derivs[i](self._net_cache[i])
+                grad = grad * act_deriv
+                if self.norms[i] is not None:
+                    grad = self.norms[i].backward(grad)
+                grad = self.layers[i].backward(grad)
+
+    def update_weights(self, learning_rate, l1_lambda=0.0, l2_lambda=0.0):
+        for i, layer in enumerate(self.layers):
+            grad_w = layer.dweights.copy()
+
+            # Tambahkan gradien regularisasi ke bobot
+            if l1_lambda > 0:
+                grad_w += l1_lambda * np.sign(layer.weights)
+            if l2_lambda > 0:
+                grad_w += l2_lambda * layer.weights
+
+            layer.weights -= learning_rate * grad_w
+            layer.biases -= learning_rate * layer.dbiases
+
+            # Update RMSNorm gamma
+            if self.norms[i] is not None:
+                self.norms[i].update(learning_rate)
+
+    def train(self, x_train, y_train, x_val=None, y_val=None,
+              batch_size=32, learning_rate=0.01, epochs=10,
+              verbose=1, l1_lambda=0.0, l2_lambda=0.0):
+        n_samples = x_train.shape[0]
+
+        for epoch in range(epochs):
+            indices = np.random.permutation(n_samples)
+            x_shuffled = x_train[indices]
+            y_shuffled = y_train[indices]
+
+            epoch_loss = 0.0
+
+            for start in range(0, n_samples, batch_size):
+                end = start + batch_size
+                x_batch = x_shuffled[start:end]
+                y_batch = y_shuffled[start:end]
+                y_pred = self.forward(x_batch)
+                batch_loss = self._loss_fn(y_batch, y_pred)
+                epoch_loss += batch_loss * len(x_batch)
+
+
+                self.backward(y_batch, y_pred)
+                self.update_weights(learning_rate, l1_lambda, l2_lambda)
+
+            epoch_loss /= n_samples
+            self.history['train_loss'].append(epoch_loss)
+
+            val_msg = ""
+            if x_val is not None and y_val is not None:
+                y_val_pred = self.forward(x_val)
+                val_loss = self._loss_fn(y_val, y_val_pred)
+                self.history['val_loss'].append(val_loss)
+                val_msg = f" - val_loss: {val_loss:.4f}"
+
+            if verbose >= 1:
+                print(f"Epoch {epoch + 1}/{epochs} - train_loss: {epoch_loss:.4f}{val_msg}")
+
+        return self.history
+
+    def predict(self, x):
+        return self.forward(x)
+
+    def save(self, filename):
+        with open(filename, 'wb') as f:
+            pickle.dump(self, f)
+
+    @staticmethod
+    def load(filename):
+        with open(filename, 'rb') as f:
+            return pickle.load(f)
+
+    def plot_loss(self):
+        plt.figure(figsize=(10, 5))
+        plt.plot(self.history['train_loss'], label='Training Loss', linewidth=2)
+        if self.history['val_loss']:
+            plt.plot(self.history['val_loss'], label='Validation Loss', linewidth=2)
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.title('Training History')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.show()
+
+    def plot_weight_distribution(self, layer_indices=None):
+        if layer_indices is None:
+            layer_indices = list(range(len(self.layers)))
+
+        n_plots = len(layer_indices)
+        fig, axes = plt.subplots(n_plots, 1, figsize=(10, 3 * n_plots))
+        if n_plots == 1:
+            axes = [axes]
+
+        for i, idx in enumerate(layer_indices):
+            if idx < 0 or idx >= len(self.layers):
+                print(f"Peringatan: Layer index {idx} di luar jangkauan, dilewati.")
+                continue
+
+            weights = self.layers[idx].weights.flatten()
+            axes[i].hist(weights, bins=30, edgecolor='black', alpha=0.7)
+            axes[i].set_title(f"Layer {idx + 1} ({self.layer_sizes[idx]}→{self.layer_sizes[idx+1]}) — Distribusi Bobot")
+            axes[i].set_xlabel("Nilai Bobot")
+            axes[i].set_ylabel("Frekuensi")
+            axes[i].grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.show()
+
+    def plot_gradient_distribution(self, layer_indices=None):
+        if layer_indices is None:
+            layer_indices = list(range(len(self.layers)))
+
+        n_plots = len(layer_indices)
+        fig, axes = plt.subplots(n_plots, 1, figsize=(10, 3 * n_plots))
+        if n_plots == 1:
+            axes = [axes]
+
+        for i, idx in enumerate(layer_indices):
+            if idx < 0 or idx >= len(self.layers):
+                print(f"Peringatan: Layer index {idx} di luar jangkauan, dilewati.")
+                continue
+
+            gradients = self.layers[idx].dweights.flatten()
+            axes[i].hist(gradients, bins=30, edgecolor='black', alpha=0.7)
+            axes[i].set_title(f"Layer {idx + 1} ({self.layer_sizes[idx]}→{self.layer_sizes[idx+1]}) — Distribusi Gradien")
+            axes[i].set_xlabel("Nilai Gradien")
+            axes[i].set_ylabel("Frekuensi")
+            axes[i].grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.show()
