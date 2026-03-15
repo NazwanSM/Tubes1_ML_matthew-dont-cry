@@ -26,20 +26,11 @@ class DenseLayer:
         self.dbiases = np.zeros_like(self.biases)
 
     def forward(self, inputs):
-        """
-        Menghitung nilai net input (linear combination).
-        net = XW + b
-        """
         self.inputs = inputs
         net = np.dot(inputs, self.weights) + self.biases
         return net
 
     def backward(self, d_net):
-        """
-        Menghitung turunan parsial terhadap bobot (dE/dW), bias (dE/db), dan input (dE/dX).
-        Parameter d_net merepresentasikan turunan Error terhadap net (dE/d_net) yang 
-        dikirim dari fungsi aktivasi atau layer setelahnya.
-        """
         # dE/dW = dE/d_net * d_net/dW
         self.dweights = np.dot(self.inputs.T, d_net)
         # Gradien untuk bias dE/db
