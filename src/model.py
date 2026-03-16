@@ -81,6 +81,21 @@ class FFNN:
             'val_loss': []
         }
 
+    def _progress_bar(current, total, width=28):
+        if total <= 0:
+            total = 1
+        ratio = current / total
+        filled = int(width * ratio)
+        return "[" + "=" * filled + "." * (width - filled) + "]"
+
+    def _regularization_loss(self, l1_lambda=0.0, l2_lambda=0.0):
+        reg_loss = 0.0
+        if l1_lambda > 0:
+            reg_loss += l1_lambda * sum(np.sum(np.abs(layer.weights)) for layer in self.layers)
+        if l2_lambda > 0:
+            reg_loss += 0.5 * l2_lambda * sum(np.sum(layer.weights ** 2) for layer in self.layers)
+        return reg_loss
+
     def forward(self, x):
         self._net_cache = []
         self._act_cache = [x]
@@ -122,8 +137,14 @@ class FFNN:
             grad = self._loss_deriv(y_true, y_pred)
 
             for i in reversed(range(n_layers)):
-                act_deriv = self._act_derivs[i](self._net_cache[i])
-                grad = grad * act_deriv
+                if self.activation_names[i] == 'softmax':
+                    # Vector-Jacobian product for softmax:
+                    # J^T v = s * (v - sum(v*s)).
+                    s = self._act_cache[i + 1]
+                    grad = s * (grad - np.sum(grad * s, axis=1, keepdims=True))
+                else:
+                    act_deriv = self._act_derivs[i](self._net_cache[i])
+                    grad = grad * act_deriv
                 if self.norms[i] is not None:
                     grad = self.norms[i].backward(grad)
                 grad = self.layers[i].backward(grad)
@@ -148,7 +169,13 @@ class FFNN:
     def train(self, x_train, y_train, x_val=None, y_val=None,
               batch_size=32, learning_rate=0.01, epochs=10,
               verbose=1, l1_lambda=0.0, l2_lambda=0.0):
+        self.history = {
+            'train_loss': [],
+            'val_loss': []
+        }
+
         n_samples = x_train.shape[0]
+        n_batches = (n_samples + batch_size - 1) // batch_size
 
         for epoch in range(epochs):
             indices = np.random.permutation(n_samples)
@@ -157,7 +184,7 @@ class FFNN:
 
             epoch_loss = 0.0
 
-            for start in range(0, n_samples, batch_size):
+            for batch_idx, start in enumerate(range(0, n_samples, batch_size), start=1):
                 end = start + batch_size
                 x_batch = x_shuffled[start:end]
                 y_batch = y_shuffled[start:end]
@@ -169,18 +196,33 @@ class FFNN:
                 self.backward(y_batch, y_pred)
                 self.update_weights(learning_rate, l1_lambda, l2_lambda)
 
-            epoch_loss /= n_samples
-            self.history['train_loss'].append(epoch_loss)
+                if verbose == 1:
+                    running_loss = epoch_loss / min(end, n_samples)
+                    bar = self._progress_bar(batch_idx, n_batches)
+                    print(
+                        f"\rEpoch {epoch + 1}/{epochs} {bar} {batch_idx}/{n_batches} "
+                        f"train_loss: {running_loss:.4f}",
+                        end=""
+                    )
+
+            data_loss = epoch_loss / n_samples
+            reg_loss = self._regularization_loss(l1_lambda, l2_lambda) / n_samples
+            total_train_loss = data_loss + reg_loss
+            self.history['train_loss'].append(total_train_loss)
 
             val_msg = ""
             if x_val is not None and y_val is not None:
                 y_val_pred = self.forward(x_val)
-                val_loss = self._loss_fn(y_val, y_val_pred)
+                val_loss = self._loss_fn(y_val, y_val_pred) + reg_loss
                 self.history['val_loss'].append(val_loss)
                 val_msg = f" - val_loss: {val_loss:.4f}"
 
-            if verbose >= 1:
-                print(f"Epoch {epoch + 1}/{epochs} - train_loss: {epoch_loss:.4f}{val_msg}")
+            if verbose == 1:
+                print(
+                    f"\rEpoch {epoch + 1}/{epochs} "
+                    f"{self._progress_bar(n_batches, n_batches)} {n_batches}/{n_batches} "
+                    f"train_loss: {total_train_loss:.4f}{val_msg}"
+                )
 
         return self.history
 
