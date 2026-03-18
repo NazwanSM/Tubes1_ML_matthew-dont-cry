@@ -81,6 +81,14 @@ class FFNN:
             'val_loss': []
         }
 
+        self._optimizer_step = 0
+        self._adam_m_w = []
+        self._adam_v_w = []
+        self._adam_m_b = []
+        self._adam_v_b = []
+        self._adam_m_g = []
+        self._adam_v_g = []
+
     def _progress_bar(current, total, width=28):
         if total <= 0:
             total = 1
@@ -149,26 +157,113 @@ class FFNN:
                     grad = self.norms[i].backward(grad)
                 grad = self.layers[i].backward(grad)
 
-    def update_weights(self, learning_rate, l1_lambda=0.0, l2_lambda=0.0):
-        for i, layer in enumerate(self.layers):
-            grad_w = layer.dweights.copy()
+    def _initialize_adam_state(self):
+        self._optimizer_step = 0
+        self._adam_m_w = [np.zeros_like(layer.weights) for layer in self.layers]
+        self._adam_v_w = [np.zeros_like(layer.weights) for layer in self.layers]
+        self._adam_m_b = [np.zeros_like(layer.biases) for layer in self.layers]
+        self._adam_v_b = [np.zeros_like(layer.biases) for layer in self.layers]
 
-            # Tambahkan gradien regularisasi ke bobot
-            if l1_lambda > 0:
-                grad_w += l1_lambda * np.sign(layer.weights)
-            if l2_lambda > 0:
-                grad_w += l2_lambda * layer.weights
+        self._adam_m_g = []
+        self._adam_v_g = []
+        for norm in self.norms:
+            if norm is None:
+                self._adam_m_g.append(None)
+                self._adam_v_g.append(None)
+            else:
+                self._adam_m_g.append(np.zeros_like(norm.gamma))
+                self._adam_v_g.append(np.zeros_like(norm.gamma))
 
-            layer.weights -= learning_rate * grad_w
-            layer.biases -= learning_rate * layer.dbiases
+    def update_weights(
+        self,
+        learning_rate,
+        l1_lambda=0.0,
+        l2_lambda=0.0,
+        optimizer='adam',
+        beta1=0.9,
+        beta2=0.999,
+        epsilon=1e-8
+    ):
+        optimizer = optimizer.lower()
+        if optimizer == 'default':
+            optimizer = 'adam'
 
-            # Update RMSNorm gamma
-            if self.norms[i] is not None:
-                self.norms[i].update(learning_rate)
+        if optimizer == 'adam':
+            if len(self._adam_m_w) != len(self.layers):
+                self._initialize_adam_state()
+
+            self._optimizer_step += 1
+            t = self._optimizer_step
+
+            for i, layer in enumerate(self.layers):
+                grad_w = layer.dweights.copy()
+                grad_b = layer.dbiases.copy()
+
+                # gradien regularisasi ke bobot
+                if l1_lambda > 0:
+                    grad_w += l1_lambda * np.sign(layer.weights)
+                if l2_lambda > 0:
+                    grad_w += l2_lambda * layer.weights
+
+                # update untuk weights
+                self._adam_m_w[i] = beta1 * self._adam_m_w[i] + (1 - beta1) * grad_w
+                self._adam_v_w[i] = beta2 * self._adam_v_w[i] + (1 - beta2) * (grad_w ** 2)
+                m_hat_w = self._adam_m_w[i] / (1 - beta1 ** t)
+                v_hat_w = self._adam_v_w[i] / (1 - beta2 ** t)
+                layer.weights -= learning_rate * m_hat_w / (np.sqrt(v_hat_w) + epsilon)
+
+                # update untuk biases
+                self._adam_m_b[i] = beta1 * self._adam_m_b[i] + (1 - beta1) * grad_b
+                self._adam_v_b[i] = beta2 * self._adam_v_b[i] + (1 - beta2) * (grad_b ** 2)
+                m_hat_b = self._adam_m_b[i] / (1 - beta1 ** t)
+                v_hat_b = self._adam_v_b[i] / (1 - beta2 ** t)
+                layer.biases -= learning_rate * m_hat_b / (np.sqrt(v_hat_b) + epsilon)
+
+                # update untuk RMSNorm gamma (jika ada)
+                if self.norms[i] is not None:
+                    grad_g = self.norms[i].dgamma.copy()
+                    self._adam_m_g[i] = beta1 * self._adam_m_g[i] + (1 - beta1) * grad_g
+                    self._adam_v_g[i] = beta2 * self._adam_v_g[i] + (1 - beta2) * (grad_g ** 2)
+                    m_hat_g = self._adam_m_g[i] / (1 - beta1 ** t)
+                    v_hat_g = self._adam_v_g[i] / (1 - beta2 ** t)
+                    self.norms[i].gamma -= learning_rate * m_hat_g / (np.sqrt(v_hat_g) + epsilon)
+
+            return
+
+        if optimizer == 'sgd':
+            for i, layer in enumerate(self.layers):
+                grad_w = layer.dweights.copy()
+
+                # add gradien regularisasi ke bobot
+                if l1_lambda > 0:
+                    grad_w += l1_lambda * np.sign(layer.weights)
+                if l2_lambda > 0:
+                    grad_w += l2_lambda * layer.weights
+
+                layer.weights -= learning_rate * grad_w
+                layer.biases -= learning_rate * layer.dbiases
+
+                # Update RMSNorm gamma
+                if self.norms[i] is not None:
+                    self.norms[i].update(learning_rate)
+            return
+
+        raise ValueError("optimizer harus 'sgd' atau 'adam'")
 
     def train(self, x_train, y_train, x_val=None, y_val=None,
               batch_size=32, learning_rate=0.01, epochs=10,
-              verbose=1, l1_lambda=0.0, l2_lambda=0.0):
+              verbose=1, l1_lambda=0.0, l2_lambda=0.0,
+              optimizer='adam', beta1=0.9, beta2=0.999, epsilon=1e-8):
+        optimizer = optimizer.lower()
+        if optimizer == 'default':
+            optimizer = 'adam'
+        if optimizer not in ('sgd', 'adam'):
+            raise ValueError("optimizer harus 'default', 'sgd', atau 'adam'")
+
+        if optimizer == 'adam':
+            # m_t, v_t, bias correction m_hat dan v_hat.
+            self._initialize_adam_state()
+
         self.history = {
             'train_loss': [],
             'val_loss': []
@@ -194,7 +289,15 @@ class FFNN:
 
 
                 self.backward(y_batch, y_pred)
-                self.update_weights(learning_rate, l1_lambda, l2_lambda)
+                self.update_weights(
+                    learning_rate,
+                    l1_lambda,
+                    l2_lambda,
+                    optimizer=optimizer,
+                    beta1=beta1,
+                    beta2=beta2,
+                    epsilon=epsilon
+                )
 
                 if verbose == 1:
                     running_loss = epoch_loss / min(end, n_samples)
