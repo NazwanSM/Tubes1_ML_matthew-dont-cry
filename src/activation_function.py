@@ -1,6 +1,6 @@
 import numpy as np
 
-# Kelas fungsi aktivasi -- Linear, ReLU, Sigmoid, Tanh, Softmax, ELU, Swish
+# Kelas fungsi aktivasi (Linear, ReLU, Sigmoid, Tanh, Softmax, ELU, Swish)
 class ActivationFunctions:
     def linear(self, x):
         return x
@@ -35,7 +35,7 @@ class ActivationFunctions:
 
     def softmax_derivative(self, x):
         s = self.softmax(x)
-        # return per- sample Jacobian matrices with shape (batch, n_class, n_class).
+        # return per-sample Jacobian matrices with shape (batch, n_class, n_class).
         if s.ndim == 1:
             s = s.reshape(1, -1)
         batch_size, n_class = s.shape
